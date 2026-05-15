@@ -1,0 +1,231 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+
+# параметры модели
+N = 200
+p_growth = 0.00000000001  # скорость роста деревьев новых 
+base_p_ignition = 0.99  # базовая вероятность воспламенения
+p_lightning = 0.00001  # вероятность удара молнии летом
+steps = 500
+WIND_BOOST = 2.8  # ускорение распространения огня по ветру
+
+# 8 направлений ветра (dr, dc). dr изменение строки, dc изменение столбца
+wind_directions = {
+    "N": (-1, 0), "NE": (-1, 1), "E": (0, 1), "SE": (1, 1),
+    "S": (1, 0), "SW": (1, -1), "W": (0, -1), "NW": (-1, -1)
+}
+wind_name = np.random.choice(list(wind_directions.keys()))
+wind_dir = wind_directions[wind_name]
+print(f"Выбранное направление ветра: {wind_name}")
+
+# сезоны
+seasons = ["spring", "summer", "autumn"]
+season_start = np.random.choice(seasons)  # один раз при старте
+
+def get_seasonal_multiplier(season):
+    multipliers = {
+        "spring": 1.0,
+        "summer": 1.2,
+        "autumn": 1.1
+    }
+    return multipliers[season]
+
+def initialize_grid_with_big_river(n):
+    grid = np.zeros((n, n), dtype=int)
+
+    # заполняем поле: 0 - пусто, 1 - дерево
+    for i in range(n):
+        for j in range(n):
+            if np.random.random() < 0.8:  # 80% деревья
+                grid[i, j] = 1
+
+    # генерация длинной извилистой реки
+    river_path = [(0, np.random.randint(0, n))]
+    while river_path[-1][0] < n - 1:
+        x, y = river_path[-1]
+        next_options = []
+        for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            nx, ny = x + dx, y + dy
+            if 0 <= nx < n and 0 <= ny < n:
+                next_options.append((nx, ny))
+        next_pos = next_options[np.random.randint(len(next_options))]
+        river_path.append(next_pos)
+
+    for x, y in river_path:
+        grid[x, y] = 3  # вода
+
+    # найти деревья и случайно выбрать одно для поджога
+    tree_positions = np.argwhere(grid == 1)
+    if len(tree_positions) == 0:
+        print("Ошибка: деревьев нет, невозможно начать огонь.")
+        return grid
+
+    random_tree = tree_positions[np.random.randint(len(tree_positions))]
+    x, y = random_tree
+    grid[x, y] = 2  # огонь
+
+    print(f"Огонь появился на позиции ({x}, {y})")
+    return grid
+
+def next_state(grid, season, wind_dir):
+    new_grid = grid.copy()
+    seasonal_multiplier = get_seasonal_multiplier(season)
+    p_ignition = min(base_p_ignition * seasonal_multiplier, 1.0)
+    n = grid.shape[0]
+
+    for i in range(n):
+        for j in range(n):
+            cell = grid[i, j]
+            if cell == 2:  # огонь
+                new_grid[i, j] = 0  # сгорает - пусто
+            elif cell == 1:  # дерево
+                p_ignite_total = 0.0
+                # проверяем 4 соседей
+                for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    nx, ny = i + dx, j + dy
+                    if 0 <= nx < n and 0 <= ny < n and grid[nx, ny] == 2:
+                        # направление ОТ горящего соседа К текущей клетке
+                        dir_to_cell = (-dx, -dy)
+                        
+                        # определяем влияние ветра
+                        if dir_to_cell == wind_dir:
+                            # полное совпадение с направлением ветра
+                            p_neighbor = p_ignition * WIND_BOOST
+                        elif (wind_dir[0] != 0 and dir_to_cell[0] == wind_dir[0] and dir_to_cell[1] == 0) or \
+                             (wind_dir[1] != 0 and dir_to_cell[0] == 0 and dir_to_cell[1] == wind_dir[1]):
+                            # диагональный ветер- частичное ускорение для совпадающих осей
+                            p_neighbor = p_ignition * (1 + (WIND_BOOST - 1) * 0.5)
+                        else:
+                            p_neighbor = p_ignition
+                        
+                        # ограничиваем вероятность 1.0 и объединяем независимые вероятности от соседей
+                        p_neighbor = min(p_neighbor, 1.0)
+                        p_ignite_total = 1 - (1 - p_ignite_total) * (1 - p_neighbor)
+
+                if np.random.random() < p_ignite_total:
+                    new_grid[i, j] = 2  # загорается
+                    
+            elif cell == 0:  # пусто
+                if np.random.random() < p_growth:
+                    new_grid[i, j] = 1  # вырастает дерево
+
+    # молния- только летом
+    if season == "summer":
+        if np.random.random() < p_lightning:
+            tree_positions = np.argwhere(new_grid == 1)
+            if len(tree_positions) > 0:
+                random_tree = tree_positions[np.random.randint(len(tree_positions))]
+                x, y = random_tree
+                new_grid[x, y] = 2
+
+    return new_grid
+
+def animate(frame_num, img, grid, season, wind_dir, ax, stats, burned_area_history):
+    new_grid = next_state(grid, season, wind_dir)
+    img.set_array(new_grid)
+    grid[:] = new_grid[:]
+    ax.set_title(f"Season: {season} | Wind: {wind_name} | Step: {frame_num}", fontsize=14)
+
+    fire_count = np.sum(grid == 2)
+    stats['fire_duration'] += 1 if fire_count > 0 else 0
+    stats['burned_area'] = np.sum(grid == 0) - stats['initial_empty']
+    burned_area_history.append(stats['burned_area'])
+    return img,
+
+# запуск
+grid = initialize_grid_with_big_river(N)
+
+stats = {
+    'fire_duration': 0,
+    'burned_area': 0,
+    'initial_empty': np.sum(grid == 0),
+    'crossed_river': 0
+}
+
+burned_area_history = []  # список для хранения выгоревшей площади на каждом шаге
+
+fig, ax = plt.subplots()
+# цвета: 0=серый (пусто), 1=зелёный (дерево), 2=красный (огонь), 3=синий (вода)
+cmap_custom = plt.cm.colors.ListedColormap(['gray', 'green', 'red', 'blue'])
+bounds = [0, 1, 2, 3, 4]
+norm = plt.cm.colors.BoundaryNorm(bounds, cmap_custom.N)
+
+img = ax.imshow(grid, cmap=cmap_custom, norm=norm)
+ani = animation.FuncAnimation(
+    fig, animate, 
+    fargs=(img, grid, season_start, wind_dir, ax, stats, burned_area_history),
+    frames=steps,
+    interval=200,
+    repeat=False
+)
+
+plt.show()
+
+# график 1 рост выгоревшей площади во времени
+plt.figure(figsize=(12, 5))
+
+plt.subplot(1, 2, 1)
+plt.plot(burned_area_history, color='red', linewidth=2)
+plt.xlabel('Шаг времени', fontsize=12)
+plt.ylabel('Выгоревшая площадь (клеток)', fontsize=12)
+plt.title('Рост выгоревшей площади во времени', fontsize=14)
+plt.grid(True, alpha=0.3)
+plt.xlim(0, len(burned_area_history))
+plt.ylim(bottom=0)
+
+# добавляем отметку максимальной площади
+max_area = max(burned_area_history) if burned_area_history else 0
+max_step = burned_area_history.index(max_area) if burned_area_history else 0
+plt.plot(max_step, max_area, 'ro', markersize=8)
+plt.annotate(f'Макс: {max_area}', xy=(max_step, max_area), xytext=(max_step+10, max_area+50),
+             arrowprops=dict(arrowstyle='->', color='gray'), fontsize=10)
+
+# график 2 тепловая карта распределения пожара на 100-м шаге
+# сначала нужно сохранить состояние сетки на 100-м шаге, но у нас нет сохранения в анимации.
+# поэтому перезапустим симуляцию до 100-го шага, не отображая анимацию.
+
+print("\nСтроим тепловую карту на 100-м шаге...")
+
+# Повторяем симуляцию с теми же начальными условиями
+grid_for_heatmap = initialize_grid_with_big_river(N)
+for step in range(100):
+    grid_for_heatmap = next_state(grid_for_heatmap, season_start, wind_dir)
+
+# тепловая карта распределения пожара
+plt.subplot(1, 2, 2)
+# создаем маску для тепловой карты: 0 - пусто/выгорело, 1 - дерево, 2 - огонь
+heatmap_data = np.zeros_like(grid_for_heatmap, dtype=float)
+heatmap_data[grid_for_heatmap == 1] = 1  # деревья
+heatmap_data[grid_for_heatmap == 2] = 2  # огонь
+heatmap_data[grid_for_heatmap == 3] = np.nan  # вода (не отображаем или особый цвет)
+
+im = plt.imshow(heatmap_data, cmap='YlOrRd', interpolation='nearest', vmin=0, vmax=2)
+plt.colorbar(im, ticks=[0, 1, 2], label='Статус: 0=пусто, 1=дерево, 2=огонь')
+plt.title(f'Тепловая карта пожара на шаге 100\n(Ветер: {wind_name}, Сезон: {season_start})', fontsize=12)
+plt.xlabel('Столбец', fontsize=10)
+plt.ylabel('Строка', fontsize=10)
+
+plt.tight_layout()
+plt.show()
+
+# пересчитываем статистику после анимации
+final_burned_area = stats['burned_area']
+fire_duration = stats['fire_duration']
+
+water_positions = np.argwhere(grid == 3)
+crossed_river = 0
+for x, y in water_positions:
+    for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+        nx, ny = x + dx, y + dy
+        if 0 <= nx < N and 0 <= ny < N and grid[nx, ny] == 0:
+            crossed_river = 1
+            break
+    if crossed_river:
+        break
+
+print("\n--- Статистика ---")
+print(f"Площадь пожара: {final_burned_area}")
+print(f"Длительность пожара (в тактах): {fire_duration}")
+print(f"Время года начала: {season_start}")
+print(f"Огонь перешёл через реку: {'Да' if crossed_river else 'Нет'}")
